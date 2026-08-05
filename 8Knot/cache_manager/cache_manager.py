@@ -50,6 +50,47 @@ class CacheManager:
             decode_responses=decode_value,
         )
 
+    @staticmethod
+    def _query_lock_key(func_name, repo):
+        return f"8knot:query-lock:{func_name}:{repo}"
+
+    def allow_dispatch(self, client_key, limit, window_seconds):
+        """Atomically enforce a fixed-window dispatch limit for one client."""
+        key = f"8knot:dispatch-rate:{client_key}"
+        count = self._redis.eval(
+            """
+            local count = redis.call('INCR', KEYS[1])
+            if count == 1 then
+                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            end
+            return count
+            """,
+            1,
+            key,
+            window_seconds,
+        )
+        return count <= limit
+
+    def acquire_query_locks(self, func_name, repos, ttl_seconds):
+        """Atomically reserve uncached repositories for a query dispatch."""
+        with self._redis.pipeline(transaction=True) as pipe:
+            for repo in repos:
+                pipe.set(self._query_lock_key(func_name, repo), "1", nx=True, ex=ttl_seconds)
+            acquired = pipe.execute()
+        return [repo for repo, was_acquired in zip(repos, acquired) if was_acquired]
+
+    def release_query_locks(self, func_name, repos):
+        """Release query reservations after their cache bookkeeping commits."""
+        if repos:
+            self._redis.delete(*[self._query_lock_key(func_name, repo) for repo in repos])
+
+    def refresh_query_locks(self, func_name, repos, ttl_seconds):
+        """Keep reservations alive while a queued query or retry is running."""
+        with self._redis.pipeline(transaction=True) as pipe:
+            for repo in repos:
+                pipe.expire(self._query_lock_key(func_name, repo), ttl_seconds)
+            pipe.execute()
+
     def _get_hash(self, func, repo):
         """
         (private)
