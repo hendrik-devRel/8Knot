@@ -48,7 +48,7 @@ class AugurManager:
             Connects to Augur databse with supplied credentials and
             returns engine object.
 
-        run_query(query_string):
+        run_query(statement, params):
             Runs a SQL-query against Augur database and returns resulting
             Pandas dataframe.
     """
@@ -128,13 +128,14 @@ class AugurManager:
 
         return engine
 
-    def run_query(self, query_string: str) -> pd.DataFrame:
+    def run_query(self, statement, params=None) -> pd.DataFrame:
         """
         Runs SQL query against our Augur database.
 
         Args:
         -----
-            query_string (str): SQL query to run.
+            statement: SQL statement to run.
+            params (dict): Bound parameters for the statement.
 
         Returns:
         --------
@@ -146,11 +147,12 @@ class AugurManager:
 
         result_df = pd.DataFrame()
 
-        query = salc.sql.text(query_string)
+        if isinstance(statement, str):
+            statement = salc.sql.text(statement)
 
         try:
             with self.engine.connect() as conn:
-                result_df = pd.read_sql(query, con=conn)
+                result_df = pd.read_sql(statement, con=conn, params=params)
         except:
             raise Exception("DB Read Failure")
 

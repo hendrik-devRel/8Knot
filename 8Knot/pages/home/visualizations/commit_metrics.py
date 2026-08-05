@@ -1,5 +1,6 @@
 from dash import html, dcc
 import dash_bootstrap_components as dbc
+import sqlalchemy as salc
 from dash import callback
 from dash.dependencies import Input, Output, State
 from db_manager.augur_manager import AugurManager
@@ -125,6 +126,13 @@ def commit_count(repolist):
         repolist ([int]): list of the repos queried
     """
 
+    if (
+        type(repolist) is not list
+        or len(repolist) > 1500
+        or any(type(repo_id) is not int or repo_id <= 0 for repo_id in repolist)
+    ):
+        raise ValueError("repo-choices must be a list of at most 1500 positive integer repository IDs")
+
     # create augurmanager, should get creds from environment
     db = AugurManager()
 
@@ -132,8 +140,8 @@ def commit_count(repolist):
     db.get_engine()
 
     # run query
-    df = db.run_query(
-        f"""
+    statement = salc.text(
+        """
         select
             /*commit_hash'es are unique per commit*/
             count(distinct c.cmt_commit_hash) as num_commits
@@ -141,10 +149,11 @@ def commit_count(repolist):
             augur_data.commits c,
             augur_data.repo r
         where
-            r.repo_id in ({str(repolist)[1:-1]})
+            r.repo_id in :repo_ids
             and c.repo_id = r.repo_id
         """
-    )
+    ).bindparams(salc.bindparam("repo_ids", expanding=True))
+    df = db.run_query(statement, {"repo_ids": repolist})
 
     return df.iat[0, 0]
 
