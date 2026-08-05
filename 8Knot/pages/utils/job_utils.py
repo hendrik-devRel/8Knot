@@ -31,7 +31,7 @@ timeout_graph.update_traces(
 )
 timeout_graph.update_layout(
     title={
-        "text": "No Available Data",
+        "text": "Data Temporarily Unavailable - Retry",
         "y": 0.9,
         "x": 0.5,
         "xanchor": "center",

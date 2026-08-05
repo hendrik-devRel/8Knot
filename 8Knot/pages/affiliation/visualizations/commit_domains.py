@@ -9,7 +9,8 @@ from dateutil.relativedelta import *  # type: ignore
 import plotly.express as px
 from pages.utils.graph_utils import baby_blue
 from queries.commits_query import commits_query as cmq
-from pages.utils.job_utils import nodata_graph
+from pages.utils.job_utils import nodata_graph, timeout_graph
+from app import augur
 import time
 import datetime as dt
 import cache_manager.cache_facade as cf
@@ -136,14 +137,21 @@ def toggle_popover(n, is_open):
         Input(f"company-contributions-required-{PAGE}-{VIZ_ID}", "value"),
         Input(f"date-picker-range-{PAGE}-{VIZ_ID}", "start_date"),
         Input(f"date-picker-range-{PAGE}-{VIZ_ID}", "end_date"),
+        Input("data-badge", "children"),
     ],
     background=True,
 )
-def commit_domains_graph(repolist, num, start_date, end_date):
-    # wait for data to asynchronously download and become available.
-    while not_cached := cf.get_uncached(func_name=cmq.__name__, repolist=repolist):
-        logging.warning(f"COMMITS_OVER_TIME_VIZ - WAITING ON DATA TO BECOME AVAILABLE")
-        time.sleep(0.5)
+def commit_domains_graph(repolist, num, start_date, end_date, _cache_status):
+    if not isinstance(repolist, list) or not repolist or any(
+        not isinstance(repo_id, int) or isinstance(repo_id, bool) or augur.repo_id_to_git(repo_id) is None
+        for repo_id in repolist
+    ):
+        logging.warning(f"{VIZ_ID} - INVALID REPOSITORY SELECTION")
+        return timeout_graph
+
+    if not_cached := cf.get_uncached(func_name=cmq.__name__, repolist=repolist):
+        logging.warning(f"{VIZ_ID} - CACHE NOT READY FOR {not_cached}")
+        return timeout_graph
 
     start = time.perf_counter()
     logging.warning(f"{VIZ_ID}- START")
