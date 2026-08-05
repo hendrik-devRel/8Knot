@@ -11,7 +11,7 @@ from dateutil.relativedelta import *  # type: ignore
 import plotly.express as px
 from pages.utils.graph_utils import get_graph_time_values, baby_blue
 from queries.contributors_query import contributors_query as ctq
-from pages.utils.job_utils import nodata_graph
+from pages.utils.job_utils import nodata_graph, timeout_graph
 import time
 import datetime as dt
 import app
@@ -20,6 +20,8 @@ import cache_manager.cache_facade as cf
 
 PAGE = "chaoss"
 VIZ_ID = "contrib-importance-pie"
+CACHE_WAIT_TIMEOUT_SECONDS = 5
+MAX_REPOSITORIES = 1500
 
 gc_contrib_importance_pie = dbc.Card(
     [
@@ -206,8 +208,21 @@ def graph_title(k, action_type):
     background=True,
 )
 def create_top_k_cntrbs_graph(repolist, action_type, top_k, start_date, end_date, bot_switch):
+    if (
+        not isinstance(repolist, list)
+        or not repolist
+        or len(repolist) > MAX_REPOSITORIES
+        or any(type(repo_id) is not int or app.augur.repo_id_to_git(repo_id) is None for repo_id in repolist)
+    ):
+        logging.warning(f"{VIZ_ID} - INVALID REPOSITORY SELECTION")
+        return nodata_graph, False
+
     # wait for data to asynchronously download and become available.
+    cache_wait_deadline = time.monotonic() + CACHE_WAIT_TIMEOUT_SECONDS
     while not_cached := cf.get_uncached(func_name=ctq.__name__, repolist=repolist):
+        if time.monotonic() >= cache_wait_deadline:
+            logging.warning(f"{VIZ_ID} - DATA UNAVAILABLE; RETRY REQUEST")
+            return timeout_graph, False
         logging.warning(f"{VIZ_ID}- WAITING ON DATA TO BECOME AVAILABLE")
         time.sleep(0.5)
 
