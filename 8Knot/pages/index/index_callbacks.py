@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import hashlib
 import re
 import os
 import time
@@ -40,6 +41,9 @@ from .search_utils import clean_repo_name
 # list of queries to be run
 # QUERIES = [iq, cq, cnq, prq, aq, iaq, praq, prr, cpfq, rfq, prfq, rlq, pvq, rrq, osq, riq] - codebase page disabled
 QUERIES = [iq, cq, cnq, prq, aq, iaq, praq, prr, rlq, pvq, rrq, osq, riq]
+
+QUERY_DISPATCH_LIMIT = int(os.getenv("EIGHTKNOT_QUERY_DISPATCH_LIMIT", "4"))
+QUERY_DISPATCH_WINDOW_SECONDS = int(os.getenv("EIGHTKNOT_QUERY_DISPATCH_WINDOW_SECONDS", "60"))
 
 
 # check if login has been enabled in config
@@ -621,8 +625,37 @@ def run_queries(repos):
         repos ([int]): repositories we collect data for.
     """
 
+    if not repos:
+        return []
+    if not isinstance(repos, list) or len(repos) > cf.MAX_REPOSITORIES_PER_QUERY:
+        logging.warning("QUERY DISPATCH REJECTED: invalid repository batch size")
+        raise dash.exceptions.PreventUpdate
+    if any(type(repo) is not int for repo in repos):
+        logging.warning("QUERY DISPATCH REJECTED: repository IDs must be integers")
+        raise dash.exceptions.PreventUpdate
+
+    allowed_repos = {
+        int(option["value"])
+        for option in augur.get_multiselect_options()
+        if str(option.get("value", "")).isdigit()
+    }
+    repos = list(dict.fromkeys(repos))
+    if any(repo not in allowed_repos for repo in repos):
+        logging.warning("QUERY DISPATCH REJECTED: repository ID is not a server-side option")
+        raise dash.exceptions.PreventUpdate
+
+    client_identity = current_user.get_id() if current_user.is_authenticated else flask.request.remote_addr
+    client_key = hashlib.sha256(str(client_identity or "unknown").encode()).hexdigest()
+
     # cache manager object
     cache = cm()
+    try:
+        if not cache.allow_dispatch(client_key, QUERY_DISPATCH_LIMIT, QUERY_DISPATCH_WINDOW_SECONDS):
+            logging.warning("QUERY DISPATCH REJECTED: client rate limit exceeded")
+            raise dash.exceptions.PreventUpdate
+    except redis.RedisError as e:
+        logging.error(f"QUERY DISPATCH REJECTED: dispatch limiter unavailable: {e}")
+        raise dash.exceptions.PreventUpdate
 
     # list of queries to process
     funcs = QUERIES
@@ -637,8 +670,21 @@ def run_queries(repos):
             logging.warning(f"{f.__name__} - NO DISPATCH - ALL REPOS IN CACHE")
             continue
 
+        try:
+            not_ready = cache.acquire_query_locks(f.__name__, not_ready, cf.QUERY_LOCK_SECONDS)
+        except redis.RedisError as e:
+            logging.error(f"{f.__name__} - NO DISPATCH - LOCK SERVICE UNAVAILABLE: {e}")
+            continue
+        if len(not_ready) == 0:
+            logging.warning(f"{f.__name__} - NO DISPATCH - QUERY ALREADY QUEUED")
+            continue
+
         # add job to queue
-        j = f.apply_async(args=[not_ready], queue="data")
+        try:
+            j = f.apply_async(args=[not_ready], queue="data")
+        except Exception:
+            cache.release_query_locks(f.__name__, not_ready)
+            raise
 
         # add job promise to local promise list
         jobs.append(j)

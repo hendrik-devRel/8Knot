@@ -21,6 +21,7 @@ We're not experts in the field of ORMs and DB drivers, and would be
 happy to be proven wrong about the apparent performance tradeoff.
 """
 import logging
+import os
 from uuid import uuid4
 import psycopg2 as pg
 from psycopg2.extras import execute_values
@@ -32,6 +33,13 @@ import pandas as pd
 # .cx_common- interpreter is invoked at a higher level, so relative
 # import required.
 from .cx_common import db_cx_string, env_augur_schema, cache_cx_string
+from .cache_manager import CacheManager
+
+
+MAX_REPOSITORIES_PER_QUERY = int(os.getenv("EIGHTKNOT_MAX_REPOSITORIES_PER_QUERY", "25"))
+MAX_QUERY_ROWS = int(os.getenv("EIGHTKNOT_MAX_QUERY_ROWS", "500000"))
+QUERY_TIMEOUT_MS = int(os.getenv("EIGHTKNOT_QUERY_TIMEOUT_MS", "900000"))
+QUERY_LOCK_SECONDS = int(os.getenv("EIGHTKNOT_QUERY_LOCK_SECONDS", "3000"))
 
 
 def cache_query_results(
@@ -58,7 +66,7 @@ def cache_query_results(
     logging.warning(f"{target_table} -- CQR CACHE_QUERY_RESULTS BEGIN")
     with pg.connect(
         db_connection_string,
-        options=f"-c search_path={env_augur_schema}",
+        options=f"-c search_path={env_augur_schema} -c statement_timeout={QUERY_TIMEOUT_MS}",
     ) as augur_conn:
         with augur_conn.cursor(name=f"{target_table}-{uuid4()}") as augur_cur:
             # set number of rows we want from primary db at a time
@@ -81,10 +89,15 @@ def cache_query_results(
 
                 # iterate through pages of rows from server.
                 logging.warning(f"{target_table} -- CQR FETCHING AND STORING ROWS")
+                row_count = 0
                 while rows := augur_cur.fetchmany(client_pagination):
                     if not rows:
                         # we're out of rows
                         break
+
+                    row_count += len(rows)
+                    if row_count > MAX_QUERY_ROWS:
+                        raise RuntimeError(f"{target_table} exceeded the {MAX_QUERY_ROWS} row cache limit")
 
                     # write available rows to cache.
                     with cache_conn.cursor() as cache_cur:
@@ -169,12 +182,26 @@ def caching_wrapper(func_name: str, query: str, repolist: list[int], n_repolist_
     Returns:
         _type_: None
     """
+    if not isinstance(repolist, list) or len(repolist) > MAX_REPOSITORIES_PER_QUERY:
+        raise ValueError(f"Repository batch exceeds the {MAX_REPOSITORIES_PER_QUERY} repository limit")
+    if any(type(repo) is not int for repo in repolist):
+        raise ValueError("Repository IDs must be integers")
+
+    try:
+        CacheManager().refresh_query_locks(func_name, repolist, QUERY_LOCK_SECONDS)
+    except Exception as e:
+        logging.warning(f"{func_name} COLLECTION - COULD NOT REFRESH DISPATCH LOCKS: {e}")
+
     try:
         # STEP 1: Which repos need to be queried for?
         #           some might already be in cache.
         uncached_repos: list[int] | None = get_uncached(func_name=func_name, repolist=repolist)
         if not uncached_repos:
             logging.warning(f"{func_name} COLLECTION - ALL REQUESTED REPOS IN CACHE")
+            try:
+                CacheManager().release_query_locks(func_name, repolist)
+            except Exception as e:
+                logging.error(f"{func_name} COLLECTION - COULD NOT RELEASE DISPATCH LOCKS: {e}")
             return 0
         else:
             logging.warning(f"{func_name} COLLECTION - CACHING {len(uncached_repos)} NEW REPOS")
@@ -197,6 +224,11 @@ def caching_wrapper(func_name: str, query: str, repolist: list[int], n_repolist_
 
         # raise exception so caching function knows to restart
         raise Exception(e)
+    else:
+        try:
+            CacheManager().release_query_locks(func_name, repolist)
+        except Exception as e:
+            logging.error(f"{func_name} COLLECTION - COULD NOT RELEASE DISPATCH LOCKS: {e}")
 
 
 def retrieve_from_cache(

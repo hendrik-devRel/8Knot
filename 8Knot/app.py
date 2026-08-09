@@ -21,6 +21,7 @@ import sqlalchemy as salc
 import plotly.io as plt_io
 import dash_bootstrap_components as dbc
 import dash_bootstrap_templates as dbt
+from werkzeug.middleware.proxy_fix import ProxyFix
 from db_manager.augur_manager import AugurManager
 import _login
 from _celery import celery_app, celery_manager
@@ -124,6 +125,7 @@ app = dash.Dash(
 """CONFIGURE FLASK-LOGIN"""
 server = app.server
 server = _login.configure_server_login(server)
+server.wsgi_app = ProxyFix(server.wsgi_app, x_for=1)
 
 """HEALTH CHECK ENDPOINT"""
 
